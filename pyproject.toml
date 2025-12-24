@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "gradops"
+version = "0.0.1"
+description = "Finite Differences Operations on GPU (CuPy)."
+readme = "README.md"
+license = {file = "LICENSE"}
+authors = [{name = "Kwang Eun Jang", email = "kejang@gmail.com"}]
+requires-python = ">=3.10"
+
+dependencies = [
+    "numpy>=1.21",
+    "scipy",
+]
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.package-data]
+gradops = ["cuda/*.cu"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
