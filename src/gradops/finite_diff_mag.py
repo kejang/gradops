@@ -3,19 +3,15 @@ from importlib import resources as ir
 import numpy as np
 import cupy as cp
 
-from .utils import to_device_array, from_device_array
-
-
-module_path = ir.files(__package__)
-cuda_dir = module_path / "cuda"
-n_devices = cp.cuda.runtime.getDeviceCount()
-
 from .utils import (
     read_cu_file,
-    compile_rawkernel_per_device,
+    compile_rawkernel,
     to_device_array,
     from_device_array,
 )
+
+module_path = ir.files(__package__)
+cuda_dir = module_path / "cuda"
 
 
 _KERNEL_SPECS = {
@@ -27,18 +23,12 @@ _KERNEL_SPECS = {
     "d_mag_grad_3d_complex": ("d_mag_grad_3d_complex.cu", "d_mag_grad_3d_complex"),
 }
 
-_globals = globals()
-for varname, (cu_file, func_name) in _KERNEL_SPECS.items():
-    _globals[varname] = compile_rawkernel_per_device(
-        read_cu_file(cuda_dir, cu_file), func_name, n_devices
-    )
 
+def _get_spec_key(ndim: int, is_complex: bool) -> str:
 
-def _select_absgrad_kernels(ndim: int, is_complex: bool) -> list:
-    if ndim not in (1, 2, 3):
-        raise ValueError(f"FiniteDifferenceMagOp supports ndim <= 3, got {ndim}")
     suffix = "complex" if is_complex else "real"
-    return _globals[f"d_mag_grad_{ndim}d_{suffix}"]
+    spec_key = f"d_mag_grad_{ndim}d_{suffix}"
+    return spec_key
 
 
 class FiniteDifferenceMagOp:
@@ -48,7 +38,7 @@ class FiniteDifferenceMagOp:
         self.n = np.int64(np.prod(self.sz_im))
         self.is_complex = bool(is_complex)
         self.dtype = cp.float32
-        self.gpu_id = int(gpu_id)
+        self.gpu_id = gpu_id
         self.stream = stream
 
         # dims (nx, ny, nz)
@@ -61,7 +51,12 @@ class FiniteDifferenceMagOp:
         else:
             raise ValueError("FiniteDifferenceMagOp Error: only support dim <= 3")
 
-        self.kernels = _select_absgrad_kernels(self.ndim, self.is_complex)
+        spec_key = _get_spec_key(self.ndim, self.is_complex)
+        cu_filename, func_name = _KERNEL_SPECS[spec_key]
+
+        self.kernel = compile_rawkernel(
+            read_cu_file(cuda_dir, cu_filename), func_name, self.gpu_id
+        )
 
         with cp.cuda.Device(self.gpu_id), self.stream as _:
             self.block_events = cp.cuda.Event(block=True)
@@ -105,7 +100,7 @@ class FiniteDifferenceMagOp:
             )
 
         with cp.cuda.Device(self.gpu_id):
-            self.kernels[self.gpu_id](self.grd, self.blk, args, stream=self.stream)
+            self.kernel(self.grd, self.blk, args, stream=self.stream)
 
         xp = cp.get_array_module(x)
         if xp == np:

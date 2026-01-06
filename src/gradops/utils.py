@@ -15,24 +15,13 @@ def read_cu_file(cuda_dir: Traversable, filename: str) -> str:
         ) from e
 
 
-def _cuda_include_dir() -> str:
-    return str(Path(get_cuda_path()) / "include")
+def compile_rawkernel(src: str, kernel_name: str, gpu_id: int):
 
-
-def compile_rawkernel_per_device(src: str, kernel_name: str, n_devices: int) -> list:
-
-    include_dir = _cuda_include_dir()
+    include_dir = str(Path(get_cuda_path()) / "include")
     options = ("--std=c++11", f"--include-path={include_dir}")
-
-    kernels = [None] * n_devices
-    for gpu_id in range(n_devices):
-        with cp.cuda.Device(gpu_id):
-            kernels[gpu_id] = cp.RawKernel(
-                src,
-                kernel_name,
-                options=options,
-            )
-    return kernels
+    with cp.cuda.Device(gpu_id):
+        kernel = cp.RawKernel(src, kernel_name, options=options)
+    return kernel
 
 
 def to_device_array(x, gpu_id, stream, dtype_real="float32", dtype_complex="complex64"):

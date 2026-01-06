@@ -6,7 +6,7 @@ from cupyx.scipy.sparse.linalg import LinearOperator
 
 from .utils import (
     read_cu_file,
-    compile_rawkernel_per_device,
+    compile_rawkernel,
     to_device_array,
     from_device_array,
 )
@@ -14,7 +14,6 @@ from .utils import (
 
 module_path = ir.files(__package__)
 cuda_dir = module_path / "cuda"
-n_devices = cp.cuda.runtime.getDeviceCount()
 
 
 _KERNEL_SPECS = {
@@ -38,24 +37,19 @@ _KERNEL_SPECS = {
     "dtd_z_complex": ("dtd_z_complex.cu", "dtd_z_complex"),
 }
 
-_globals = globals()
-for varname, (cu_file, func_name) in _KERNEL_SPECS.items():
-    _globals[varname] = compile_rawkernel_per_device(
-        read_cu_file(cuda_dir, cu_file), func_name, n_devices
-    )
 
-
-def get_kernels(is_complex: bool, is_normal: bool, direction: str):
-    if direction not in ("x", "y", "z"):
-        raise ValueError(f"direction must be one of ('x','y','z'), got {direction!r}")
+def _get_spec_key(is_complex: bool, is_normal: bool, direction: str):
 
     suffix = "complex" if is_complex else "real"
 
     if is_normal:
-        k = _globals[f"dtd_{direction}_{suffix}"]
-        return k, k
+        spec_key_fwd = f"dtd_{direction}_{suffix}"
+        spec_key_adj = f"dtd_{direction}_{suffix}"
+    else:
+        spec_key_fwd = f"d_{direction}_{suffix}"
+        spec_key_adj = f"dt_{direction}_{suffix}"
 
-    return _globals[f"d_{direction}_{suffix}"], _globals[f"dt_{direction}_{suffix}"]
+    return spec_key_fwd, spec_key_adj
 
 
 class _FiniteDifferenceOp:
@@ -64,7 +58,7 @@ class _FiniteDifferenceOp:
         self.dtype = cp.dtype(dtype)
         self.n = np.int64(np.prod(sz_im))
         self.edge = edge
-        self.gpu_id = int(gpu_id)
+        self.gpu_id = gpu_id
         self.stream = stream
 
         if len(sz_im) == 1:
@@ -76,7 +70,7 @@ class _FiniteDifferenceOp:
         else:
             raise ValueError("sz_im error: only support dim <= 3")
 
-        with cp.cuda.Device(self.gpu_id), self.stream as _:
+        with cp.cuda.Device(self.gpu_id), self.stream:
             self.block_events = cp.cuda.Event(block=True)
 
         if (self.ny == 1) and (self.nz == 1):
@@ -93,7 +87,7 @@ class _FiniteDifferenceOp:
         )
 
     def run(self, x, kernel):
-        with cp.cuda.Device(self.gpu_id), self.stream as _:
+        with cp.cuda.Device(self.gpu_id), self.stream:
             d_y = cp.empty((self.n,), dtype=self.dtype)
 
         d_x = to_device_array(
@@ -114,7 +108,7 @@ class _FiniteDifferenceOp:
         )
 
         with cp.cuda.Device(self.gpu_id):
-            kernel[self.gpu_id](self.grd, self.blk, args, stream=self.stream)
+            kernel(self.grd, self.blk, args, stream=self.stream)
 
         xp = cp.get_array_module(x)
         if xp == np:
@@ -132,16 +126,30 @@ class FiniteDifferenceOp(LinearOperator):
         self.direction = direction
         self.edge = edge
         self.dtype = cp.dtype(dtype)
-
         if self.dtype not in (cp.float32, cp.complex64):
             raise TypeError(
                 f"Expected float32/complex64 for these CUDA kernels, got {self.dtype}."
             )
 
         is_complex = np.iscomplexobj(np.ones((1,), dtype=dtype))
-        self.kernel_forward, self.kernel_adjoint = get_kernels(
-            is_complex, is_normal, direction
-        )
+
+        spec_key_fwd, spec_key_adj = _get_spec_key(is_complex, is_normal, direction)
+
+        if is_normal:
+            cu_filename, func_name = _KERNEL_SPECS[spec_key_fwd]
+            self.kernel_forward = compile_rawkernel(
+                read_cu_file(cuda_dir, cu_filename), func_name, gpu_id
+            )
+            self.kernel_adjoint = self.kernel_forward
+        else:
+            cu_filename_fwd, func_name_fwd = _KERNEL_SPECS[spec_key_fwd]
+            cu_filename_adj, func_name_adj = _KERNEL_SPECS[spec_key_adj]
+            self.kernel_forward = compile_rawkernel(
+                read_cu_file(cuda_dir, cu_filename_fwd), func_name_fwd, gpu_id
+            )
+            self.kernel_adjoint = compile_rawkernel(
+                read_cu_file(cuda_dir, cu_filename_adj), func_name_adj, gpu_id
+            )
 
         self.d_op = _FiniteDifferenceOp(
             direction=direction,
