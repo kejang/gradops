@@ -53,25 +53,33 @@ def _get_spec_key(is_complex: bool, is_normal: bool, direction: str):
 
 
 class _FiniteDifferenceOp:
+
     def __init__(self, direction, sz_im, dtype, gpu_id, stream, edge):
+
         self.direction = direction
         self.dtype = cp.dtype(dtype)
-        self.n = np.int64(np.prod(sz_im))
         self.edge = edge
         self.gpu_id = gpu_id
         self.stream = stream
+        self.set_size(sz_im)
 
-        if len(sz_im) == 1:
-            self.nz, self.ny, self.nx = 1, 1, int(sz_im[0])
-        elif len(sz_im) == 2:
-            self.nz, self.ny, self.nx = 1, int(sz_im[-2]), int(sz_im[-1])
-        elif len(sz_im) == 3:
-            self.nz, self.ny, self.nx = int(sz_im[-3]), int(sz_im[-2]), int(sz_im[-1])
+    def set_size(self, sz_im):
+
+        self.sz_im = tuple(int(s) for s in sz_im)
+        self.n = np.int64(np.prod(sz_im))
+        self.ndim = len(sz_im)
+
+        if self.ndim == 1:
+            self.nx = sz_im[0]
+            self.ny = 1
+            self.nz = 1
+        elif self.ndim == 2:
+            self.ny, self.nx = sz_im
+            self.nz = 1
+        elif self.ndim == 3:
+            self.nz, self.ny, self.nx = sz_im
         else:
             raise ValueError("sz_im error: only support dim <= 3")
-
-        with cp.cuda.Device(self.gpu_id), self.stream:
-            self.block_events = cp.cuda.Event(block=True)
 
         if (self.ny == 1) and (self.nz == 1):
             self.blk = (256, 1, 1)
@@ -87,16 +95,25 @@ class _FiniteDifferenceOp:
         )
 
     def run(self, x, kernel):
-        with cp.cuda.Device(self.gpu_id), self.stream:
-            d_y = cp.empty((self.n,), dtype=self.dtype)
 
-        d_x = to_device_array(
-            x,
-            gpu_id=self.gpu_id,
-            stream=self.stream,
-            dtype_real="float32",
-            dtype_complex="complex64",
-        )
+        xp = cp.get_array_module(x)
+
+        if xp == np:
+            d_x = to_device_array(
+                x,
+                gpu_id=self.gpu_id,
+                stream=self.stream,
+                dtype_real="float32",
+                dtype_complex="complex64",
+            )
+        else:
+            if cp.iscomplexobj(x):
+                d_x = x.astype("complex64", copy=False)
+            else:
+                d_x = x.astype("float32", copy=False)
+
+        with cp.cuda.Device(self.gpu_id), self.stream:
+            d_y = cp.empty(self.sz_im, dtype=self.dtype)
 
         args = (
             d_y,
@@ -110,12 +127,12 @@ class _FiniteDifferenceOp:
         with cp.cuda.Device(self.gpu_id):
             kernel(self.grd, self.blk, args, stream=self.stream)
 
-        xp = cp.get_array_module(x)
         if xp == np:
-            return from_device_array(
-                d_y, gpu_id=self.gpu_id, stream=self.stream
-            ).astype(x.dtype)
-        return d_y
+            y = from_device_array(d_y, gpu_id=self.gpu_id, stream=self.stream)
+        else:
+            y = d_y
+
+        return y
 
 
 class FiniteDifferenceOp(LinearOperator):
@@ -162,8 +179,13 @@ class FiniteDifferenceOp(LinearOperator):
 
         self.shape = (self.d_op.n, self.d_op.n)
 
+    def set_size(self, sz_im):
+
+        self.d_op.set_size(sz_im)
+        self.shape = (self.d_op.n, self.d_op.n)
+
     def _matvec(self, x):
-        return self.d_op.run(x, self.kernel_forward)
+        return self.d_op.run(x, self.kernel_forward).ravel()
 
     def _rmatvec(self, x):
-        return self.d_op.run(x, self.kernel_adjoint)
+        return self.d_op.run(x, self.kernel_adjoint).ravel()
