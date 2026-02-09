@@ -85,7 +85,7 @@ class FiniteDifferenceMagOp:
             int((self.nz + self.blk[2] - 1) / self.blk[2]),
         )
 
-    def run(self, x):
+    def run(self, x, out=None):
 
         xp = cp.get_array_module(x)
         if xp == np:
@@ -103,7 +103,10 @@ class FiniteDifferenceMagOp:
                 d_x = x.astype("float32", copy=False)
 
         with cp.cuda.Device(self.gpu_id), self.stream:
-            d_y = cp.empty(self.sz_im, dtype=self.dtype)
+            if out is None:
+                d_y = cp.empty(self.sz_im, dtype=self.dtype)
+            else:
+                d_y = out
 
         if self.ndim == 1:
             args = (d_y, d_x, np.uint32(self.nx))
@@ -121,9 +124,11 @@ class FiniteDifferenceMagOp:
         with cp.cuda.Device(self.gpu_id):
             self.kernel(self.grd, self.blk, args, stream=self.stream)
 
-        if xp == np:
-            y = from_device_array(d_y, gpu_id=self.gpu_id, stream=self.stream)
-        else:
-            y = d_y
+        if out is not None:
+            return out
 
-        return y
+        if xp == np:
+            h_y = from_device_array(d_y, gpu_id=self.gpu_id, stream=self.stream)
+            return h_y
+
+        return d_y
